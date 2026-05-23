@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabase/server';
+import { createClient } from '@supabase/supabase-js';
 import { isAuthenticated } from '@/lib/auth';
 import { isValidStatus } from '@/lib/status';
+
+function getSupabase() {
+  return createClient(
+    (process.env.NEXT_PUBLIC_SUPABASE_URL || '').trim(),
+    (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '').trim(),
+  );
+}
 
 export async function POST(request: NextRequest) {
   const authed = await isAuthenticated();
@@ -28,24 +35,20 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Status inválido' }, { status: 400 });
     }
 
-    const { data, error } = await supabaseAdmin.from('tracking_events').insert({
-      shipment_id,
-      status,
-      descricao,
-      local_cidade: local_cidade || null,
-      local_uf: local_uf || null,
-      ocorrido_em,
-    }).select().single();
+    const supabase = getSupabase();
+    const { data, error } = await supabase.rpc('admin_add_event', {
+      admin_token: (process.env.ADMIN_PASSWORD || '').trim(),
+      p_shipment_id: shipment_id,
+      p_status: status,
+      p_descricao: descricao,
+      p_local_cidade: local_cidade || '',
+      p_local_uf: local_uf || '',
+      p_ocorrido_em: ocorrido_em,
+    });
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
-
-    // Update shipment status
-    await supabaseAdmin
-      .from('shipments')
-      .update({ status_atual: status })
-      .eq('id', shipment_id);
 
     return NextResponse.json(data, { status: 201 });
   } catch {

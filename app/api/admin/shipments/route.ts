@@ -1,8 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabase/server';
+import { createClient } from '@supabase/supabase-js';
 import { isAuthenticated } from '@/lib/auth';
 import { generateTrackingCode } from '@/lib/format';
 import { generateNarrative } from '@/lib/narratives';
+
+function getSupabase() {
+  return createClient(
+    (process.env.NEXT_PUBLIC_SUPABASE_URL || '').trim(),
+    (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '').trim(),
+  );
+}
+
+function getAdminToken() {
+  return (process.env.ADMIN_PASSWORD || '').trim();
+}
 
 export async function GET() {
   const authed = await isAuthenticated();
@@ -10,10 +21,10 @@ export async function GET() {
     return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
   }
 
-  const { data, error } = await supabaseAdmin
-    .from('shipments')
-    .select('*')
-    .order('created_at', { ascending: false });
+  const supabase = getSupabase();
+  const { data, error } = await supabase.rpc('admin_list_shipments', {
+    admin_token: getAdminToken(),
+  });
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
@@ -55,32 +66,6 @@ export async function POST(request: NextRequest) {
     };
 
     const codigo = generateTrackingCode();
-
-    // Create shipment
-    const { data: shipment, error: shipmentError } = await supabaseAdmin
-      .from('shipments')
-      .insert({
-        codigo,
-        servico: servico || 'Expresso',
-        remetente_nome,
-        remetente_cidade,
-        remetente_uf,
-        destinatario_nome,
-        destinatario_cidade,
-        destinatario_uf,
-        peso_kg: peso_kg || 0.5,
-        status_atual: 'postado',
-        previsao_entrega: previsao_entrega || null,
-        demo_mode: demo_mode || false,
-      })
-      .select()
-      .single();
-
-    if (shipmentError || !shipment) {
-      return NextResponse.json({ error: shipmentError?.message || 'Erro ao criar' }, { status: 500 });
-    }
-
-    // Create first event
     const descricao = generateNarrative('postado', {
       origemCidade: remetente_cidade,
       origemUf: remetente_uf,
@@ -88,16 +73,28 @@ export async function POST(request: NextRequest) {
       destinoUf: destinatario_uf,
     });
 
-    await supabaseAdmin.from('tracking_events').insert({
-      shipment_id: shipment.id,
-      status: 'postado',
-      descricao,
-      local_cidade: remetente_cidade,
-      local_uf: remetente_uf,
-      ocorrido_em: new Date().toISOString(),
+    const supabase = getSupabase();
+    const { data, error } = await supabase.rpc('admin_create_shipment', {
+      admin_token: getAdminToken(),
+      p_codigo: codigo,
+      p_servico: servico || 'Expresso',
+      p_remetente_nome: remetente_nome,
+      p_remetente_cidade: remetente_cidade,
+      p_remetente_uf: remetente_uf,
+      p_destinatario_nome: destinatario_nome,
+      p_destinatario_cidade: destinatario_cidade,
+      p_destinatario_uf: destinatario_uf,
+      p_peso_kg: peso_kg || 0.5,
+      p_previsao_entrega: previsao_entrega || null,
+      p_demo_mode: demo_mode || false,
+      p_first_event_desc: descricao,
     });
 
-    return NextResponse.json(shipment, { status: 201 });
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+
+    return NextResponse.json(data, { status: 201 });
   } catch {
     return NextResponse.json({ error: 'Erro interno' }, { status: 500 });
   }

@@ -1,9 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabase/server';
+import { createClient } from '@supabase/supabase-js';
 import { isAuthenticated } from '@/lib/auth';
 import { nextStatus, isValidStatus } from '@/lib/status';
 import { generateNarrative, getEventLocal } from '@/lib/narratives';
 import type { Shipment } from '@/lib/types';
+
+function getSupabase() {
+  return createClient(
+    (process.env.NEXT_PUBLIC_SUPABASE_URL || '').trim(),
+    (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '').trim(),
+  );
+}
+
+function getAdminToken() {
+  return (process.env.ADMIN_PASSWORD || '').trim();
+}
 
 export async function GET(
   _request: NextRequest,
@@ -15,24 +26,19 @@ export async function GET(
   }
 
   const { id } = await params;
+  const supabase = getSupabase();
 
-  const { data: shipment, error } = await supabaseAdmin
-    .from('shipments')
-    .select('*')
-    .eq('id', id)
-    .single();
+  const { data, error } = await supabase.rpc('admin_get_shipment', {
+    admin_token: getAdminToken(),
+    shipment_id: id,
+  });
 
-  if (error || !shipment) {
-    return NextResponse.json({ error: 'Não encontrado' }, { status: 404 });
+  if (error) {
+    const status = error.message.includes('not_found') ? 404 : 500;
+    return NextResponse.json({ error: error.message }, { status });
   }
 
-  const { data: events } = await supabaseAdmin
-    .from('tracking_events')
-    .select('*')
-    .eq('shipment_id', id)
-    .order('ocorrido_em', { ascending: false });
-
-  return NextResponse.json({ ...shipment, tracking_events: events || [] });
+  return NextResponse.json(data);
 }
 
 export async function PATCH(
@@ -45,6 +51,8 @@ export async function PATCH(
   }
 
   const { id } = await params;
+  const supabase = getSupabase();
+  const token = getAdminToken();
 
   try {
     const body = await request.json();
@@ -56,27 +64,26 @@ export async function PATCH(
 
     // Toggle demo_mode
     if (typeof demo_mode === 'boolean') {
-      const { error } = await supabaseAdmin
-        .from('shipments')
-        .update({ demo_mode })
-        .eq('id', id);
-
-      if (error) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
-      }
+      const { error } = await supabase.rpc('admin_toggle_demo', {
+        admin_token: token,
+        p_shipment_id: id,
+        p_demo_mode: demo_mode,
+      });
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
       return NextResponse.json({ success: true });
     }
 
-    // Get current shipment
-    const { data: shipment, error: fetchError } = await supabaseAdmin
-      .from('shipments')
-      .select('*')
-      .eq('id', id)
-      .single<Shipment>();
+    // Need shipment data for advance/exception
+    const { data: shipmentData, error: fetchError } = await supabase.rpc('admin_get_shipment', {
+      admin_token: token,
+      shipment_id: id,
+    });
 
-    if (fetchError || !shipment) {
+    if (fetchError || !shipmentData) {
       return NextResponse.json({ error: 'Não encontrado' }, { status: 404 });
     }
+
+    const shipment = shipmentData as Shipment;
 
     if (action === 'advance') {
       const next = nextStatus(shipment.status_atual);
@@ -84,14 +91,7 @@ export async function PATCH(
         return NextResponse.json({ error: 'Já no status final' }, { status: 400 });
       }
 
-      const local = getEventLocal(
-        next,
-        shipment.remetente_cidade,
-        shipment.remetente_uf,
-        shipment.destinatario_cidade,
-        shipment.destinatario_uf,
-      );
-
+      const local = getEventLocal(next, shipment.remetente_cidade, shipment.remetente_uf, shipment.destinatario_cidade, shipment.destinatario_uf);
       const descricao = generateNarrative(next, {
         origemCidade: shipment.remetente_cidade,
         origemUf: shipment.remetente_uf,
@@ -101,34 +101,21 @@ export async function PATCH(
         localUf: local.uf,
       });
 
-      // Update shipment status
-      await supabaseAdmin
-        .from('shipments')
-        .update({ status_atual: next })
-        .eq('id', id);
-
-      // Create event
-      await supabaseAdmin.from('tracking_events').insert({
-        shipment_id: id,
-        status: next,
-        descricao,
-        local_cidade: local.cidade,
-        local_uf: local.uf,
-        ocorrido_em: new Date().toISOString(),
+      const { data, error } = await supabase.rpc('admin_advance_shipment', {
+        admin_token: token,
+        p_shipment_id: id,
+        p_new_status: next,
+        p_descricao: descricao,
+        p_local_cidade: local.cidade,
+        p_local_uf: local.uf,
       });
 
-      return NextResponse.json({ success: true, new_status: next });
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json(data);
     }
 
     if (action === 'exception' && exceptionStatus && isValidStatus(exceptionStatus)) {
-      const local = getEventLocal(
-        exceptionStatus,
-        shipment.remetente_cidade,
-        shipment.remetente_uf,
-        shipment.destinatario_cidade,
-        shipment.destinatario_uf,
-      );
-
+      const local = getEventLocal(exceptionStatus, shipment.remetente_cidade, shipment.remetente_uf, shipment.destinatario_cidade, shipment.destinatario_uf);
       const descricao = generateNarrative(exceptionStatus, {
         origemCidade: shipment.remetente_cidade,
         origemUf: shipment.remetente_uf,
@@ -138,21 +125,17 @@ export async function PATCH(
         localUf: local.uf,
       });
 
-      await supabaseAdmin
-        .from('shipments')
-        .update({ status_atual: exceptionStatus })
-        .eq('id', id);
-
-      await supabaseAdmin.from('tracking_events').insert({
-        shipment_id: id,
-        status: exceptionStatus,
-        descricao,
-        local_cidade: local.cidade,
-        local_uf: local.uf,
-        ocorrido_em: new Date().toISOString(),
+      const { data, error } = await supabase.rpc('admin_advance_shipment', {
+        admin_token: token,
+        p_shipment_id: id,
+        p_new_status: exceptionStatus,
+        p_descricao: descricao,
+        p_local_cidade: local.cidade,
+        p_local_uf: local.uf,
       });
 
-      return NextResponse.json({ success: true, new_status: exceptionStatus });
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json(data);
     }
 
     return NextResponse.json({ error: 'Ação inválida' }, { status: 400 });
