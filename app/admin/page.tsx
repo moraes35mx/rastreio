@@ -38,6 +38,8 @@ export default function AdminDashboard() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(showNew);
   const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [successCode, setSuccessCode] = useState<string | null>(null);
 
   const [form, setForm] = useState({
     servico: 'Expresso',
@@ -59,9 +61,12 @@ export default function AdminDashboard() {
       if (res.ok) {
         const data = await res.json();
         setShipments(data);
+      } else {
+        const err = await res.json().catch(() => ({ error: 'Erro ao carregar encomendas' }));
+        setError(err.error || 'Erro ao carregar encomendas');
       }
     } catch {
-      // ignore
+      setError('Erro de conexão ao carregar encomendas');
     } finally {
       setLoading(false);
     }
@@ -132,6 +137,7 @@ export default function AdminDashboard() {
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     setCreating(true);
+    setError(null);
     try {
       const res = await fetch('/api/admin/shipments', {
         method: 'POST',
@@ -144,6 +150,7 @@ export default function AdminDashboard() {
       });
       if (res.ok) {
         const newShipment = await res.json();
+        const codigo = newShipment.codigo;
         setShowCreateModal(false);
         router.replace('/admin');
         setForm({
@@ -158,14 +165,22 @@ export default function AdminDashboard() {
           previsao_entrega: '',
           demo_mode: false,
         });
+        setSuccessCode(codigo);
+        setTimeout(() => setSuccessCode(null), 6000);
         loadShipments();
-        // Copy the new code
-        await navigator.clipboard.writeText(newShipment.codigo);
-        setCopiedId(newShipment.codigo);
-        setTimeout(() => setCopiedId(null), 3000);
+        try {
+          await navigator.clipboard.writeText(codigo);
+          setCopiedId(codigo);
+          setTimeout(() => setCopiedId(null), 3000);
+        } catch {
+          // Clipboard pode falhar em HTTP - o toast de sucesso já mostra o código
+        }
+      } else {
+        const err = await res.json().catch(() => ({ error: 'Erro desconhecido' }));
+        setError(err.error || `Erro ${res.status} ao criar encomenda`);
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      setError(`Erro de conexão: ${err instanceof Error ? err.message : 'falha na requisição'}`);
     } finally {
       setCreating(false);
     }
@@ -491,6 +506,13 @@ export default function AdminDashboard() {
                   </div>
                 </div>
 
+                {error && (
+                  <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-300 text-sm">
+                    <AlertTriangle size={16} className="shrink-0" />
+                    <p>{error}</p>
+                  </div>
+                )}
+
                 <button
                   type="submit"
                   disabled={creating}
@@ -511,9 +533,59 @@ export default function AdminDashboard() {
         )}
       </AnimatePresence>
 
+      {/* Success toast */}
+      <AnimatePresence>
+        {successCode && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 px-5 py-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-300 text-sm flex items-center gap-3 shadow-lg"
+          >
+            <CheckCircle2 size={18} />
+            <div>
+              <p className="font-semibold">Encomenda criada!</p>
+              <p className="text-xs text-emerald-400/80 mt-0.5">Código: <code className="font-mono">{successCode}</code></p>
+            </div>
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(successCode).catch(() => {});
+                setCopiedId(successCode);
+                setTimeout(() => setCopiedId(null), 2000);
+              }}
+              className="ml-2 p-1.5 hover:bg-emerald-500/20 rounded-lg transition-colors"
+              title="Copiar código"
+            >
+              {copiedId === successCode ? <Check size={14} /> : <Copy size={14} />}
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Error toast */}
+      <AnimatePresence>
+        {error && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 20 }}
+            className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 px-5 py-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-300 text-sm flex items-center gap-3 shadow-lg max-w-md"
+          >
+            <AlertTriangle size={18} className="shrink-0" />
+            <p>{error}</p>
+            <button
+              onClick={() => setError(null)}
+              className="ml-2 p-1 hover:bg-red-500/20 rounded-lg transition-colors shrink-0"
+            >
+              <X size={14} />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Copied toast */}
       <AnimatePresence>
-        {copiedId && (
+        {copiedId && !successCode && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
